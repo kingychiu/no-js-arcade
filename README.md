@@ -88,9 +88,22 @@ The root is `package todolist` so both `cmd/server` and `e2e/` can import the wi
 
 ## Acknowledged trade-offs
 
-- **DOM-level HTMX bugs are not caught in CI.** Things like an `hx-target` that resolves to an element hidden by an earlier swap, or `hx-trigger` timing edge cases, can only be observed in a real browser. The cross-reference test catches the common class (typoed/stale target) at the contract level; the rest is accepted risk for the speed gains.
-- **No real-time UI.** No WebSockets, no SSE, no client-side state. Every change is a request. For a todo list this is the right shape; for chat apps or live dashboards it isn't.
-- **One-database scaling.** SQLite + auto-migrate on startup is single-process by design. Horizontal scaling would require migrating that pattern.
+### DOM-level HTMX bugs are not caught in CI
+
+`hx-target` that resolves to an element hidden by an earlier swap, `hx-trigger` event timing, history/restore edge cases — only a real browser sees these. The cross-reference test catches the most common silent failure (typoed/stale target) at the contract level; the rest is accepted risk for the speed gains.
+
+### Real-time interactivity has a ceiling
+
+The architecture handles per-user state changes (click → POST → HTML response) in tens of milliseconds. That covers most CRUD UX. For freshness across users or background processes, the stack scales like this:
+
+- **Refresh-style updates (seconds).** Native HTMX polling: `<div hx-get="/dashboard" hx-trigger="every 5s" hx-swap="outerHTML">`. No extensions, no second script tag, browsers auto-pause polling when the tab is backgrounded. Good for dashboards, "new items" indicators, slow background-job status, kanban boards visible to a few users.
+- **Near-real-time push (~100ms), still within the rules.** HTMX long-polling: the client issues `hx-get` with `hx-trigger="load delay:0"`, the Go handler blocks on a channel for up to N seconds (using `context.WithTimeout`), returns HTML when something fires, and the swapped element re-issues immediately. Each cycle is a complete HTTP request returning HTML — testable with `httptest.NewServer` and a context that fires the event. This is the practical answer for chat-style notifications or presence indicators *in this stack*. We don't implement it because the project has no such requirement.
+- **Sub-50ms push to many idle clients.** Needs SSE or WebSockets, which means a second `<script>` tag (HTMX 2.0 moved extensions out of core). Pick a different stack — don't bolt SSE onto this app to make it kind-of-work; the testing harness loses its integrity.
+- **Collaborative editing (Google Docs, Figma).** Character-level merge, conflict resolution, presence cursors, offline reconciliation. Needs CRDTs, a bidirectional sync protocol, and a thick client that holds partial document state. The "HTML is the API" model fundamentally can't represent the in-flight merge state. This is the **real wall** — this stack is the wrong tool for that slice, full stop.
+
+### One-database scaling
+
+SQLite + auto-migrate on startup is single-process by design. Horizontal scaling would require migrating that pattern (separate migration step, shared DB, connection pool, etc.). For the target use case — a single-instance app or per-tenant deployments — it's the right shape.
 
 ## License
 
