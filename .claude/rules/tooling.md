@@ -63,15 +63,47 @@ Run alongside the linter. It scans dependencies and the standard library for kno
 
 Different from `gosec`: govulncheck = known CVEs in deps; gosec = source-code logic flaws. We use govulncheck; we skip gosec.
 
-## Acceptable `//nolint` usage
+### Remediation when govulncheck flags stdlib CVEs
 
-The only nolint that should appear with any frequency:
+Bump the `go` directive in `go.mod` to a patched minor:
 
-```go
-defer rows.Close() //nolint:errcheck
+```
+go get go@1.25.10            # whatever the latest patched version is
 ```
 
-This is idiomatic for deferred closes where the close error is genuinely uninteresting. Don't blanket-disable across a file. Don't use `//nolint` to silence legitimate errcheck flags on `Exec`, `Execute`, `Decode`, etc. — those errors matter.
+**This is an application (`package main`), so we bump the `go` directive directly.** The `toolchain` directive is for libraries that want to compile with a newer Go than they require from importers — we have no importers. When `go` and `toolchain` are equal, Go normalizes them to a single `go` line anyway.
+
+Never suppress govulncheck findings on stdlib CVEs. Bump and re-run.
+
+## Deferred close patterns
+
+Use the right pattern for the resource. Three forms, in order of preference:
+
+**1. Closure-discard (preferred for read-only or shutdown closes).**
+```go
+defer func() { _ = sqldb.Close() }() // sql.DB on orderly shutdown
+defer func() { _ = rows.Close() }()  // read-only iteration
+```
+No `//nolint` comment, no suppressed signal — explicit discard.
+
+**2. Capture-and-check (required for writes and transactions).**
+```go
+func writeFile(path string, data []byte) (err error) {
+    f, err := os.Create(path)
+    if err != nil { return err }
+    defer func() {
+        if cerr := f.Close(); cerr != nil && err == nil {
+            err = cerr // surface close error only if no earlier error
+        }
+    }()
+    _, err = f.Write(data)
+    return err
+}
+```
+For `*os.File` writes, `tx.Commit()`, or anywhere a failed close means data loss. **Never** discard close errors on writers.
+
+**3. `//nolint:errcheck` (fallback).**
+Only when neither pattern fits — e.g., inside a non-statement defer chain. Don't blanket-disable across a file. Don't use it to silence `Exec`, `Execute`, `Decode`, or other live error returns.
 
 ## Coverage policy
 

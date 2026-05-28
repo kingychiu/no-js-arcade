@@ -16,6 +16,44 @@ Standard library only. Not `templ`. Reasons:
 - `html/template` auto-escapes user input by default. Don't disable it.
 - Auto-escape works correctly with HTMX attribute values.
 
+## Template composition pattern
+
+The full-page render uses Go's standard `define` / `template` composition. It's not obvious if you haven't seen it before, so always follow this shape:
+
+**`views/layout.html`** — the entry template. Wraps everything in `{{ define "layout" }}…{{ end }}` and calls `{{ template "content" . }}` where the inner block goes:
+
+```
+{{ define "layout" }}
+<!DOCTYPE html>
+<html>
+  <head>...</head>
+  <body>
+    <div id="error-banner" aria-live="polite"></div>
+    {{ template "content" . }}
+  </body>
+</html>
+{{ end }}
+```
+
+**`views/index.html`** — provides the inner block via `{{ define "content" }}…{{ end }}`. The file itself doesn't render anything on its own:
+
+```
+{{ define "content" }}
+<form ...>...</form>
+<ul id="todo-list">
+  {{ range . }}{{ template "todo_item.html" . }}{{ end }}
+</ul>
+{{ end }}
+```
+
+**Render via the named template, not the filename:**
+
+```go
+v.tmpl.ExecuteTemplate(w, "layout", todos)  // entry is "layout", not "layout.html"
+```
+
+Fragments (`todo_item.html`, `error_banner.html`) are NOT wrapped in `define` — the file content IS the template body, and the filename IS the template name. Render via `ExecuteTemplate(w, "todo_item.html", todo)`.
+
 ## `render.go` — load once, render fast
 
 ```go

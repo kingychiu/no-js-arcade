@@ -11,7 +11,7 @@ Applies to all `*_test.go` files. The whole project is designed to be testable w
 
 - `net/http/httptest` for the HTTP layer.
 - `github.com/PuerkitoBio/goquery` (or `golang.org/x/net/html`) for parsing response bodies.
-- `database/sql` with `_journal=MEMORY` or `:memory:` for per-test SQLite instances.
+- `database/sql` with a per-test SQLite file in `t.TempDir()` — **not** `:memory:` (see below).
 - Goose for running migrations in test setup.
 - Standard `testing` package — no testify, no ginkgo, no any third-party test framework.
 
@@ -127,10 +127,23 @@ This catches: typoed target IDs, IDs that exist in the shell but get removed by 
 Put helpers in `main_test.go` next to the tests. Don't create a `testhelpers` package — there's only one test file.
 
 Required helpers:
-- `newTestHandlers(t)` — opens `:memory:` SQLite, runs goose, builds Views and Handlers, returns the struct ready to ServeHTTP.
-- `mustCreateTodo(t, h, title)` → returns the new ID.
-- `mustProgressToInProgress(t, h, id)` — drives the state machine for setup.
-- `fetchHTML(t, h, method, path)` → `*goquery.Document`. Fails the test on non-200 unless explicitly checking otherwise.
+- `newTestEnv(t)` — opens a per-test SQLite file at `filepath.Join(t.TempDir(), "test.db")`, runs goose, builds Views and Handlers, registers routes on a fresh `*echo.Echo`. Returns the struct ready to `ServeHTTP`.
+- `mustCreate(t, env, title)` → returns the new ID.
+- `mustForceStatus(t, env, id, from, to)` — drives the state machine for setup via direct `UpdateTodoStatus` (bypassing the handler).
+- `fetchDoc(t, env, method, path, body)` → `*goquery.Document` + `*httptest.ResponseRecorder`.
+
+### Critical: do NOT use `:memory:` SQLite in tests
+
+`database/sql` opens multiple connections in a pool. `sqlite3` with `:memory:` creates an **isolated, blank database per connection** — so `goose.Up` applies migrations on one connection, and your queries hit a different connection where the table doesn't exist. `cache=shared` partially works around it but has locking edge cases with goose.
+
+The correct pattern is a per-test file in `t.TempDir()`:
+
+```go
+dbpath := filepath.Join(t.TempDir(), "test.db")
+sqldb, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_journal=WAL&_busy_timeout=5000&_sync=NORMAL&_fk=on", dbpath))
+```
+
+`t.TempDir()` is auto-cleaned by the test framework. Each test gets a fresh DB. No shared-cache surprises.
 
 ## Test naming
 

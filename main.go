@@ -18,7 +18,7 @@ var migrationsFS embed.FS
 var staticFS embed.FS
 
 func main() {
-	sqldb, err := sql.Open("sqlite3", "file:todos.db?_journal=WAL&_busy_timeout=5000&_fk=on")
+	sqldb, err := sql.Open("sqlite3", "file:todos.db?_journal=WAL&_busy_timeout=5000&_sync=NORMAL&_fk=on")
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}

@@ -73,7 +73,7 @@ type testEnv struct {
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	dbpath := filepath.Join(t.TempDir(), "test.db")
-	sqldb, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_journal=WAL&_busy_timeout=5000&_fk=on", dbpath))
+	sqldb, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_journal=WAL&_busy_timeout=5000&_sync=NORMAL&_fk=on", dbpath))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

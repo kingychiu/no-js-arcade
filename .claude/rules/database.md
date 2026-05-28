@@ -62,7 +62,17 @@ WHERE id = ? AND status = ?;
 DELETE FROM todos WHERE id = ?;
 ```
 
-### Critical: `UpdateTodoStatus` uses optimistic locking
+### Critical: `UpdateTodoStatus` uses optimistic locking with named sqlc args
+
+The actual query:
+
+```sql
+-- name: UpdateTodoStatus :execrows
+UPDATE todos SET status = sqlc.arg('new_status')
+WHERE id = sqlc.arg('id') AND status = sqlc.arg('expected_status');
+```
+
+**Use `sqlc.arg('name')` for repeated columns.** Without it, the `?` for the new status and the `?` for the expected status would generate field names like `Status` and `Status_2` — ugly and error-prone. Named args produce a clean `UpdateTodoStatusParams{NewStatus, ID, ExpectedStatus}` struct.
 
 The `AND status = ?` clause is **not optional**. It's the database-level enforcement of the FSM:
 
@@ -107,15 +117,18 @@ After editing `query.sql` or migrations: run `sqlc generate`. Commit the regener
 
 ## SQLite connection settings
 
-Open with PRAGMA flags for WAL + busy timeout to handle concurrent reads gracefully:
+Open with these DSN params on every `sql.Open`:
 
 ```go
-db, err := sql.Open("sqlite3", "file:todos.db?_journal=WAL&_busy_timeout=5000&_fk=on")
+db, err := sql.Open("sqlite3", "file:todos.db?_journal=WAL&_busy_timeout=5000&_sync=NORMAL&_fk=on")
 ```
 
 - `_journal=WAL` — readers don't block writers, important for HTMX's many small requests.
 - `_busy_timeout=5000` — wait up to 5s for write locks before failing.
+- `_sync=NORMAL` — significantly faster writes than the default `FULL`; corruption-safe **only in combination with WAL**. Don't use NORMAL with rollback-journal mode.
 - `_fk=on` — foreign keys enforced. (Not needed for the initial schema, but cheap to set now.)
+
+`mattn/go-sqlite3` translates these DSN params to PRAGMAs on connection, so you don't need to execute `PRAGMA …` manually after opening.
 
 ## What this layer does NOT do
 
