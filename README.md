@@ -33,7 +33,7 @@ The state machine is enforced at the database boundary via `UPDATE … WHERE id 
 - **HTMX** (CDN) — the only client-side library.
 - **Pico.css v2** (vendored, `go:embed`) — classless styling.
 
-Lint and test stack: one binary (`golangci-lint` with CLI flags only — `errcheck`, `staticcheck`, `govet`, `ineffassign`, `goimports`) plus `govulncheck`. Tests use stdlib `testing` and `goquery`.
+Lint and test stack: three installed binaries — `goimports` (formatting), `golangci-lint` with CLI flags only (`errcheck`, `staticcheck`, `govet`, `ineffassign`), and `govulncheck` (stdlib + dep CVEs). No `.golangci.yml`. Tests use stdlib `testing` and `goquery`.
 
 ## Running
 
@@ -50,13 +50,14 @@ The SQLite database is created automatically on first run; migrations execute on
 
 ## Testing strategy
 
-Three categories of tests live in `main_test.go`:
+Four flavors of test live in `main_test.go`:
 
 1. **FSM unit tests** — table-driven over all 9 ordered pairs of `(current, next)` states.
 2. **Handler + template contract tests** — `httptest` request → `goquery` parse → assert on selectors and `hx-*` attributes (e.g., "after PUT on a Pending todo, the response contains a button with text 'Complete' and `hx-put` pointing at `/todos/{id}/progress`").
-3. **Cross-reference test** — fetches the rendered page shell, collects every element ID, then asserts that every `hx-target` referenced by any handler response resolves to an ID that actually exists. This substitutes for browser-based DOM verification and catches the most common HTMX failure (stale/typoed target).
+3. **Optimistic-locking guard** — directly exercises `UpdateTodoStatus` with a stale `expected_status` and asserts `rowsAffected == 0`. Verifies the DB-level FSM enforcement.
+4. **Cross-reference test** — fetches the rendered page shell, collects every element ID, then asserts that every `hx-target` referenced by any handler response resolves to an ID that actually exists. This substitutes for browser-based DOM verification and catches the most common HTMX failure (stale/typoed target).
 
-No browser is used. No JSDOM. No Chrome binary. Tests run in well under a second.
+Per-test SQLite lives in `t.TempDir()` (not `:memory:` — that breaks under `database/sql` connection pooling). No browser is used. No JSDOM. No Chrome binary. Tests run in well under a second.
 
 ## Project layout
 
