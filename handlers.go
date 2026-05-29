@@ -62,8 +62,14 @@ func (h *Handlers) buildViewData(c echo.Context, sess db.Session) (*ViewData, er
 		if err != nil {
 			return data, nil // game not initialized yet — render what we can
 		}
-		if Game(gs.Game) == Game2048 {
+		switch Game(gs.Game) {
+		case Game2048:
 			var b T48Board
+			if err := json.Unmarshal([]byte(gs.Board), &b); err == nil {
+				data.Board = b
+			}
+		case GameMinesweeper:
+			var b MSBoard
 			if err := json.Unmarshal([]byte(gs.Board), &b); err == nil {
 				data.Board = b
 			}
@@ -187,7 +193,7 @@ func (h *Handlers) PostWizardGame(c echo.Context) error {
 	if !ValidGame(game) {
 		return h.renderFrameWithError(c, sess, "Unknown game.")
 	}
-	if game != Game2048 {
+	if game != Game2048 && game != GameMinesweeper {
 		return h.renderFrameWithError(c, sess, "That game isn't available yet.")
 	}
 	after, ok, err := h.transitionSession(c, sess, WizardGameChosen, string(game), "")
@@ -353,6 +359,21 @@ func (h *Handlers) initGame(c echo.Context, sess db.Session) error {
 			Board:      string(boardJSON),
 			Score:      0,
 		})
+	case GameMinesweeper:
+		w, h2, mines := MSDimensions(Difficulty(sess.ChosenDiff))
+		board := NewMSBoard(w, h2, mines)
+		boardJSON, err := json.Marshal(board)
+		if err != nil {
+			return err
+		}
+		return h.Q.UpsertGameState(ctx, db.UpsertGameStateParams{
+			SessionID:  sess.ID,
+			Game:       sess.ChosenGame,
+			Difficulty: sess.ChosenDiff,
+			FsmState:   string(MSPlaying),
+			Board:      string(boardJSON),
+			Score:      0,
+		})
 	}
 	return errors.New("unsupported game")
 }
@@ -435,6 +456,133 @@ func (h *Handlers) PostT48Move(c echo.Context) error {
 
 	// Game continues: respond with the updated board only.
 	return h.Views.Render(c, "twenty48_board", after)
+}
+
+// --- Minesweeper handlers ---
+
+// PostMSReveal handles a reveal click on a Minesweeper cell.
+func (h *Handlers) PostMSReveal(c echo.Context) error {
+	return h.postMSAction(c, "reveal")
+}
+
+// PostMSFlag handles a flag/unflag toggle on a Minesweeper cell.
+func (h *Handlers) PostMSFlag(c echo.Context) error {
+	return h.postMSAction(c, "flag")
+}
+
+func (h *Handlers) postMSAction(c echo.Context, action string) error {
+	sess, err := h.sessionFor(c)
+	if err != nil {
+		return err
+	}
+	if WizardState(sess.WizardState) != WizardPlaying || Game(sess.ChosenGame) != GameMinesweeper {
+		return h.renderFrameWithError(c, sess, "Not playing Minesweeper right now.")
+	}
+	x, err := parseIntField(c, "x")
+	if err != nil {
+		return h.renderMSBoardWithError(c, sess, "Invalid cell coordinate.")
+	}
+	y, err := parseIntField(c, "y")
+	if err != nil {
+		return h.renderMSBoardWithError(c, sess, "Invalid cell coordinate.")
+	}
+
+	ctx := c.Request().Context()
+	gs, err := h.Q.GetGameState(ctx, sess.ID)
+	if err != nil {
+		return err
+	}
+	var board MSBoard
+	if err := json.Unmarshal([]byte(gs.Board), &board); err != nil {
+		return err
+	}
+
+	currentFSM := MSState(gs.FsmState)
+	var after MSBoard
+	var newFSM MSState
+	if action == "reveal" {
+		after, newFSM = RevealCell(board, x, y, h.rng)
+	} else {
+		after, newFSM = FlagCell(board, x, y)
+	}
+
+	if newFSM != currentFSM {
+		if !currentFSM.CanTransitionTo(newFSM) {
+			return h.Views.RenderWithError(c, "minesweeper_board", board, "Invalid transition.")
+		}
+	}
+
+	afterJSON, err := json.Marshal(after)
+	if err != nil {
+		return err
+	}
+	rows, err := h.Q.UpdateGameState(ctx, db.UpdateGameStateParams{
+		NewState:      string(newFSM),
+		Board:         string(afterJSON),
+		Score:         int64(MSScore(after)),
+		SessionID:     sess.ID,
+		ExpectedState: string(currentFSM),
+	})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return h.Views.RenderWithError(c, "minesweeper_board", board, "State changed concurrently.")
+	}
+
+	if newFSM == MSWon || newFSM == MSLost {
+		if _, err := h.Q.InsertLeaderboardEntry(ctx, db.InsertLeaderboardEntryParams{
+			Name:       sess.Name,
+			Game:       sess.ChosenGame,
+			Difficulty: sess.ChosenDiff,
+			Score:      int64(MSScore(after)),
+		}); err != nil {
+			return err
+		}
+		after2, ok, err := h.transitionSession(c, sess, WizardFinished, sess.ChosenGame, sess.ChosenDiff)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return h.Views.RenderWithError(c, "minesweeper_board", after, "Could not transition to finished.")
+		}
+		c.Response().Header().Set("HX-Retarget", "#wizard-frame")
+		c.Response().Header().Set("HX-Reswap", "innerHTML")
+		return h.renderFrame(c, after2)
+	}
+
+	return h.Views.Render(c, "minesweeper_board", after)
+}
+
+func (h *Handlers) renderMSBoardWithError(c echo.Context, sess db.Session, msg string) error {
+	ctx := c.Request().Context()
+	gs, err := h.Q.GetGameState(ctx, sess.ID)
+	if err != nil {
+		return h.Views.RenderError(c, msg)
+	}
+	var board MSBoard
+	if err := json.Unmarshal([]byte(gs.Board), &board); err == nil {
+		return h.Views.RenderWithError(c, "minesweeper_board", board, msg)
+	}
+	return h.Views.RenderError(c, msg)
+}
+
+func parseIntField(c echo.Context, name string) (int, error) {
+	v := strings.TrimSpace(c.FormValue(name))
+	if v == "" {
+		return 0, errors.New("empty")
+	}
+	n := 0
+	for _, ch := range v {
+		if ch < '0' || ch > '9' {
+			return 0, errors.New("non-digit")
+		}
+		n = n*10 + int(ch-'0')
+		if n > 1024 {
+			return 0, errors.New("too large")
+		}
+	}
+	return n, nil
 }
 
 // RenderBoardWithError renders the current 2048 board (unchanged) + OOB error.

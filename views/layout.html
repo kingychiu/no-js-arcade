@@ -28,6 +28,26 @@
     #twenty48-board td[data-v="512"]  { background: #edc850; color: #fff; font-size: 1.3rem; }
     #twenty48-board td[data-v="1024"] { background: #edc53f; color: #fff; font-size: 1.1rem; }
     #twenty48-board td[data-v="2048"] { background: #edc22e; color: #fff; font-size: 1.1rem; }
+    /* Minesweeper board */
+    #minesweeper-board { display: inline-block; padding: 0.5rem; background: #c0c0c0; border-radius: 0.25rem; }
+    .ms-grid { border-collapse: separate; border-spacing: 1px; margin: 0; background: #888; }
+    .ms-cell { width: 28px; height: 28px; padding: 0; text-align: center; vertical-align: middle; font-weight: bold; font-family: var(--pico-font-family-monospace, monospace); position: relative; }
+    .ms-cell.ms-hidden { background: #d4d4d4; padding: 0; }
+    .ms-cell.ms-flagged { background: #d4d4d4; padding: 0; }
+    .ms-cell.ms-revealed { background: #efefef; color: #333; }
+    .ms-cell.ms-mine { background: #f88; color: #000; }
+    .ms-cell .ms-reveal-btn { width: 100%; height: 100%; padding: 0; border: none; background: transparent; cursor: pointer; font-size: 14px; line-height: 1; margin: 0; }
+    .ms-cell .ms-reveal-btn:hover { background: rgba(0,0,0,0.05); }
+    .ms-cell .ms-flag-btn { position: absolute; top: 0; right: 0; width: 11px; height: 11px; padding: 0; border: none; background: rgba(0,0,0,0.1); cursor: pointer; font-size: 9px; line-height: 1; margin: 0; color: #c00; }
+    .ms-cell .ms-flag-btn:hover { background: rgba(0,0,0,0.2); }
+    .ms-cell.ms-revealed[data-n="1"] { color: #1976d2; }
+    .ms-cell.ms-revealed[data-n="2"] { color: #388e3c; }
+    .ms-cell.ms-revealed[data-n="3"] { color: #d32f2f; }
+    .ms-cell.ms-revealed[data-n="4"] { color: #1565c0; }
+    .ms-cell.ms-revealed[data-n="5"] { color: #b71c1c; }
+    .ms-cell.ms-revealed[data-n="6"] { color: #00838f; }
+    .ms-cell.ms-revealed[data-n="7"] { color: #424242; }
+    .ms-cell.ms-revealed[data-n="8"] { color: #616161; }
   </style>
 </head>
 <body>

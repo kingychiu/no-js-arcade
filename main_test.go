@@ -233,6 +233,157 @@ func TestT48_ApplyMove_ProducesWonWhen2048Created(t *testing.T) {
 	}
 }
 
+func TestMSFSM_CanTransitionTo(t *testing.T) {
+	t.Parallel()
+	allowed := map[MSState]map[MSState]bool{
+		MSPlaying: {MSWon: true, MSLost: true},
+		MSWon:     {},
+		MSLost:    {},
+	}
+	states := []MSState{MSPlaying, MSWon, MSLost}
+	for _, from := range states {
+		for _, to := range states {
+			want := allowed[from][to]
+			if got := from.CanTransitionTo(to); got != want {
+				t.Errorf("%s → %s: got %v, want %v", from, to, got, want)
+			}
+		}
+	}
+}
+
+func TestMS_NewBoard_DimensionsAndEmpty(t *testing.T) {
+	t.Parallel()
+	b := NewMSBoard(9, 9, 10)
+	if b.Width != 9 || b.Height != 9 || b.MineCount != 10 {
+		t.Fatalf("dimensions wrong: %dx%d / %d", b.Width, b.Height, b.MineCount)
+	}
+	if b.MinesPlaced {
+		t.Errorf("mines should be deferred to first reveal")
+	}
+	if b.Revealed != 0 {
+		t.Errorf("revealed = %d, want 0", b.Revealed)
+	}
+	for _, row := range b.Cells {
+		for _, c := range row {
+			if c.HasMine || c.Revealed || c.Flagged {
+				t.Errorf("cell not pristine: %+v", c)
+			}
+		}
+	}
+}
+
+func TestMS_RevealCell_FirstClickIsSafe(t *testing.T) {
+	t.Parallel()
+	// Run with several seeds to spot-check first-click safety.
+	for seed := int64(0); seed < 5; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		board := NewMSBoard(9, 9, 10)
+		after, state := RevealCell(board, 4, 4, rng)
+		if after.Cells[4][4].HasMine {
+			t.Errorf("seed %d: first click landed on a mine", seed)
+		}
+		if state == MSLost {
+			t.Errorf("seed %d: first click should never lose", seed)
+		}
+		if !after.MinesPlaced {
+			t.Errorf("seed %d: mines should be placed after first reveal", seed)
+		}
+	}
+}
+
+func TestMS_RevealCell_HitsMineLoses(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	board := NewMSBoard(5, 5, 5)
+	after, _ := RevealCell(board, 0, 0, rng)
+	// Find a mine.
+	mineX, mineY := -1, -1
+	for y := 0; y < after.Height && mineX < 0; y++ {
+		for x := 0; x < after.Width; x++ {
+			if after.Cells[y][x].HasMine && !after.Cells[y][x].Revealed {
+				mineX, mineY = x, y
+				break
+			}
+		}
+	}
+	if mineX < 0 {
+		t.Fatalf("no unrevealed mine found")
+	}
+	after2, state := RevealCell(after, mineX, mineY, rng)
+	if state != MSLost {
+		t.Errorf("revealing mine should be lost, got %s", state)
+	}
+	if after2.LostAt[0] != mineX || after2.LostAt[1] != mineY {
+		t.Errorf("LostAt = %v, want [%d %d]", after2.LostAt, mineX, mineY)
+	}
+}
+
+func TestMS_RevealAllSafeCellsWins(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	board := NewMSBoard(3, 3, 1)
+	after, _ := RevealCell(board, 0, 0, rng)
+	for y := 0; y < after.Height; y++ {
+		for x := 0; x < after.Width; x++ {
+			if !after.Cells[y][x].HasMine {
+				after, _ = RevealCell(after, x, y, rng)
+			}
+		}
+	}
+	state := classifyMSState(after)
+	if state != MSWon {
+		t.Errorf("expected won after revealing all safe cells, got %s", state)
+	}
+}
+
+func TestMS_FlagCell_Toggle(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	board := NewMSBoard(5, 5, 5)
+	board, _ = RevealCell(board, 4, 4, rng) // place mines first
+
+	// Find an unrevealed cell.
+	var ux, uy int
+	found := false
+	for y := 0; y < board.Height && !found; y++ {
+		for x := 0; x < board.Width; x++ {
+			if !board.Cells[y][x].Revealed {
+				ux, uy = x, y
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no unrevealed cell")
+	}
+
+	after, state := FlagCell(board, ux, uy)
+	if !after.Cells[uy][ux].Flagged {
+		t.Errorf("expected flagged after toggle")
+	}
+	if state != MSPlaying {
+		t.Errorf("flag should not change state, got %s", state)
+	}
+
+	after2, _ := FlagCell(after, ux, uy)
+	if after2.Cells[uy][ux].Flagged {
+		t.Errorf("expected unflagged after second toggle")
+	}
+}
+
+func TestMS_FlagCell_RevealedNoOp(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	board := NewMSBoard(5, 5, 5)
+	board, _ = RevealCell(board, 4, 4, rng)
+	// (4,4) is now revealed by first click.
+	after, _ := FlagCell(board, 4, 4)
+	if after.Cells[4][4].Flagged {
+		t.Errorf("revealed cell should not be flaggable")
+	}
+}
+
 // --- 3. Handler + template contract tests ---
 
 type testEnv struct {
@@ -274,6 +425,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	e.POST("/wizard/change-difficulty", h.PostWizardChangeDifficulty)
 	e.POST("/wizard/different-game", h.PostWizardDifferentGame)
 	e.POST("/game/2048/move", h.PostT48Move)
+	e.POST("/game/minesweeper/reveal", h.PostMSReveal)
+	e.POST("/game/minesweeper/flag", h.PostMSFlag)
 	return &testEnv{e: e, q: h.Q, h: h}
 }
 
@@ -424,6 +577,57 @@ func TestPostT48Move_Valid_ReplacesBoard(t *testing.T) {
 	doc := parseHTML(t, rec)
 	if doc.Find("#twenty48-board").Length() == 0 {
 		t.Errorf("expected board fragment in response")
+	}
+}
+
+func TestPostWizardGame_Minesweeper_TransitionsToDifficulty(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	_, cookie := env.get(t, "", "/")
+	_, cookie = env.post(t, cookie, "/wizard/name", url.Values{"name": {"Min"}})
+	rec, _ := env.post(t, cookie, "/wizard/game", url.Values{"game": {"minesweeper"}})
+	doc := parseHTML(t, rec)
+	if doc.Find(`[data-step="difficulty"]`).Length() == 0 {
+		t.Fatalf("expected difficulty step; body:\n%s", rec.Body.String())
+	}
+	if !strings.Contains(doc.Text(), "9×9") {
+		t.Errorf("expected Minesweeper difficulty labels to mention 9×9")
+	}
+}
+
+func TestPostMSReveal_FirstClickIsSafe(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	cookie := walkToPlaying(t, env, "Sweeper", "minesweeper", "easy")
+	rec, _ := env.post(t, cookie, "/game/minesweeper/reveal", url.Values{"x": {"4"}, "y": {"4"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	doc := parseHTML(t, rec)
+	if doc.Find("#minesweeper-board").Length() == 0 {
+		t.Errorf("expected minesweeper board fragment")
+	}
+}
+
+func TestPostMSReveal_InvalidCoords_OOBError(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	cookie := walkToPlaying(t, env, "Bob", "minesweeper", "easy")
+	rec, _ := env.post(t, cookie, "/game/minesweeper/reveal", url.Values{"x": {"abc"}, "y": {"4"}})
+	doc := parseHTML(t, rec)
+	if doc.Find(`#error-banner[hx-swap-oob="true"]`).Length() == 0 {
+		t.Errorf("expected OOB error for invalid coord")
+	}
+}
+
+func TestPostMSFlag_TogglesFlagOnHiddenCell(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	cookie := walkToPlaying(t, env, "Flagger", "minesweeper", "easy")
+	rec, _ := env.post(t, cookie, "/game/minesweeper/flag", url.Values{"x": {"0"}, "y": {"0"}})
+	doc := parseHTML(t, rec)
+	if doc.Find("#minesweeper-board").Length() == 0 {
+		t.Errorf("expected board fragment after flag")
 	}
 }
 

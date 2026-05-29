@@ -197,6 +197,50 @@ func TestE2E_ReplayFromFinished(t *testing.T) {
 	}
 }
 
+// TestE2E_FullArcadeFlow_Minesweeper walks a Minesweeper game from name to
+// finished via Quit, exercising the new game type end-to-end.
+func TestE2E_FullArcadeFlow_Minesweeper(t *testing.T) {
+	t.Parallel()
+	srv, client := newServer(t)
+
+	_ = parseAndClose(t, get(t, client, srv.URL+"/"))
+	_ = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/name", url.Values{"name": {"Sweeper"}}))
+	doc := parseAndClose(t, postForm(t, client, srv.URL+"/wizard/game", url.Values{"game": {"minesweeper"}}))
+	if dataStep(doc) != "difficulty" {
+		t.Fatalf("after game, step = %q", dataStep(doc))
+	}
+	if !strings.Contains(doc.Text(), "9×9") {
+		t.Errorf("expected Minesweeper-specific difficulty labels")
+	}
+
+	_ = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/difficulty", url.Values{"difficulty": {"easy"}}))
+	doc = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/start", nil))
+	if dataStep(doc) != "playing" {
+		t.Fatalf("after start, step = %q", dataStep(doc))
+	}
+	if doc.Find("#minesweeper-board").Length() == 0 {
+		t.Errorf("expected Minesweeper board")
+	}
+
+	// Reveal a cell.
+	doc = parseAndClose(t, postForm(t, client, srv.URL+"/game/minesweeper/reveal", url.Values{"x": {"4"}, "y": {"4"}}))
+	if doc.Find("#minesweeper-board").Length() == 0 {
+		t.Errorf("expected board fragment after reveal")
+	}
+
+	// Flag a different cell.
+	doc = parseAndClose(t, postForm(t, client, srv.URL+"/game/minesweeper/flag", url.Values{"x": {"0"}, "y": {"0"}}))
+	if doc.Find("#minesweeper-board").Length() == 0 {
+		t.Errorf("expected board fragment after flag")
+	}
+
+	// Quit.
+	doc = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/quit", nil))
+	if dataStep(doc) != "finished" {
+		t.Fatalf("after quit, step = %q", dataStep(doc))
+	}
+}
+
 // TestE2E_DifferentGame_FromFinished returns the user to the game picker
 // from the finished step.
 func TestE2E_DifferentGame_FromFinished(t *testing.T) {

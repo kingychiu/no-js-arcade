@@ -1,0 +1,12 @@
+{{ define "minesweeper_board" }}
+<div id="minesweeper-board" hx-target="this" hx-swap="outerHTML">
+  <p style="margin:0 0 0.5rem 0;">Revealed: <strong>{{ .Revealed }}</strong> · Mines: {{ .MineCount }}</p>
+  <table class="ms-grid" aria-label="Minesweeper grid">
+    {{ range $y, $row := .Cells }}
+    <tr>
+      {{ range $x, $cell := $row }}{{ if $cell.Revealed }}{{ if $cell.HasMine }}<td class="ms-cell ms-mine">💣</td>{{ else if eq $cell.Neighbors 0 }}<td class="ms-cell ms-revealed"></td>{{ else }}<td class="ms-cell ms-revealed" data-n="{{ $cell.Neighbors }}">{{ $cell.Neighbors }}</td>{{ end }}{{ else if $cell.Flagged }}<td class="ms-cell ms-flagged"><button class="ms-reveal-btn" hx-post="/game/minesweeper/flag" hx-vals='{"x":"{{$x}}","y":"{{$y}}"}' hx-disabled-elt="this" aria-label="Unflag {{$x}},{{$y}}">⚑</button></td>{{ else }}<td class="ms-cell ms-hidden"><button class="ms-reveal-btn" hx-post="/game/minesweeper/reveal" hx-vals='{"x":"{{$x}}","y":"{{$y}}"}' hx-disabled-elt="this" aria-label="Reveal {{$x}},{{$y}}"></button><button class="ms-flag-btn" hx-post="/game/minesweeper/flag" hx-vals='{"x":"{{$x}}","y":"{{$y}}"}' hx-disabled-elt="this" aria-label="Flag {{$x}},{{$y}}">⚑</button></td>{{ end }}{{ end }}
+    </tr>
+    {{ end }}
+  </table>
+</div>
+{{ end }}

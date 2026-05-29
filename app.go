@@ -53,6 +53,8 @@ func NewApp(sqldb *sql.DB) (*echo.Echo, error) {
 	e.POST("/wizard/change-difficulty", h.PostWizardChangeDifficulty)
 	e.POST("/wizard/different-game", h.PostWizardDifferentGame)
 	e.POST("/game/2048/move", h.PostT48Move)
+	e.POST("/game/minesweeper/reveal", h.PostMSReveal)
+	e.POST("/game/minesweeper/flag", h.PostMSFlag)
 
 	return e, nil
 }

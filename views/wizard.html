@@ -26,8 +26,8 @@
 <form hx-post="/wizard/game" hx-target="#wizard-frame" hx-swap="innerHTML">
   <div class="arcade-controls">
     <button name="game" value="2048" type="submit" hx-disabled-elt="this">2048</button>
+    <button name="game" value="minesweeper" type="submit" hx-disabled-elt="this">Minesweeper</button>
     <button name="game" value="snake" type="submit" disabled>Snake (Phase 3)</button>
-    <button name="game" value="minesweeper" type="submit" disabled>Minesweeper (Phase 2)</button>
   </div>
 </form>
 {{ end }}
@@ -37,9 +37,19 @@
 <h2 data-step="difficulty">{{ .Session.ChosenGame }} — pick a difficulty</h2>
 <form hx-post="/wizard/difficulty" hx-target="#wizard-frame" hx-swap="innerHTML">
   <div class="arcade-controls">
-    <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy</button>
-    <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium</button>
-    <button name="difficulty" value="hard"   type="submit" hx-disabled-elt="this">Hard</button>
+    {{ if eq .Session.ChosenGame "2048" }}
+      <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy (5×5)</button>
+      <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium (4×4)</button>
+      <button name="difficulty" value="hard"   type="submit" hx-disabled-elt="this">Hard (3×3)</button>
+    {{ else if eq .Session.ChosenGame "minesweeper" }}
+      <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy (9×9, 10 mines)</button>
+      <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium (16×16, 40 mines)</button>
+      <button name="difficulty" value="hard"   type="submit" hx-disabled-elt="this">Hard (24×24, 99 mines)</button>
+    {{ else }}
+      <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy</button>
+      <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium</button>
+      <button name="difficulty" value="hard"   type="submit" hx-disabled-elt="this">Hard</button>
+    {{ end }}
   </div>
 </form>
 <form hx-post="/wizard/back" hx-target="#wizard-frame" hx-swap="innerHTML" class="arcade-controls">
@@ -65,9 +75,11 @@
   <p>Player: <strong>{{ .Session.Name }}</strong></p>
 </header>
 {{ if eq .Session.ChosenGame "2048" }}{{ template "twenty48_board" .Board }}{{ end }}
+{{ if eq .Session.ChosenGame "minesweeper" }}{{ template "minesweeper_board" .Board }}{{ end }}
 <details>
   <summary>How to play</summary>
-  <p>Use the arrow keys (or buttons) to slide tiles. Combine matching numbers to reach 2048.</p>
+  {{ if eq .Session.ChosenGame "2048" }}<p>Use the arrow keys (or buttons) to slide tiles. Combine matching numbers to reach 2048.</p>{{ end }}
+  {{ if eq .Session.ChosenGame "minesweeper" }}<p>Click cells to reveal them. Click the small ⚑ in the corner to flag a suspected mine. Win by revealing every non-mine cell.</p>{{ end }}
 </details>
 <form hx-post="/wizard/quit" hx-target="#wizard-frame" hx-swap="innerHTML" class="arcade-controls">
   <button type="submit" class="secondary outline" hx-disabled-elt="this">Quit (no score)</button>
