@@ -30,7 +30,7 @@ The wizard FSM ensures users can't skip from "unnamed" straight to "playing." Ea
 | **2048** | `playing → won → continued → lost` | 5×5 / 4×4 / 3×3 grid | tile-merge score |
 | **Minesweeper** | `playing → won → lost` | 9×9/10 / 16×16/40 / 24×24/99 | -seconds (lower is better) |
 
-Snake earns the **long-polling tier** documented under "Real-time interactivity has a ceiling" — its server-side game loop runs in a per-session goroutine, the client long-polls for the next board, direction-key presses are separate fire-and-forget POSTs that push into the goroutine's input channel. Everything else (2048, Minesweeper, the wizard) is pure turn-based HTMX: one HTTP request = one move = one re-render.
+Snake earns the **long-polling tier** documented under "Real-time interactivity has a ceiling" — its server-side game loop runs in a per-session goroutine (`game_snake_runtime.go`, the project's only piece of stateful in-memory machinery), the client long-polls `/game/snake/board` for the next frame, direction-key presses are separate fire-and-forget POSTs that push into the goroutine's input channel. The display fragment (`snake_board.html`) and the interactive controls (the parent `step_playing` template in `wizard.html`) are deliberately separated so HTMX's listeners stay bound while the board cycles. Everything else (2048, Minesweeper, the wizard) is pure turn-based HTMX: one HTTP request = one move = one re-render.
 
 ## The step-form lobby
 
@@ -72,25 +72,26 @@ The SQLite database is created automatically on first run; migrations execute on
 
 ## Testing strategy
 
-Two test layers in two packages:
+Two test layers in two packages, plus one structural guard.
 
-**`main_test.go`** — in-process integration tests (`package arcade`):
+**`main_test.go`** — in-process white-box tests (`package arcade`):
 
-1. **FSM unit tests** — table-driven over every (current, next) pair for the Wizard FSM and each per-game FSM.
-2. **Handler + template contract tests** — `httptest` request → `goquery` parse → assert on selectors and `hx-*` attributes.
-3. **Optimistic-locking guards** — each FSM's optimistic UPDATE returns 0 rows when the expected state is stale.
-4. **Cross-reference test** — every `hx-target="#X"` and `hx-swap-oob` id in any handler response resolves to an element ID in the rendered shell.
+1. **FSM unit tests** — table-driven over every (current, next) pair for the Wizard FSM and each of the three per-game FSMs (4 matrices total).
+2. **Pure game-logic tests** — direct calls to `Tick`/`ApplyMove`/`RevealCell`/`SetDirection`/`compactAndMergeRow`/etc. with constructed boards. Microsecond-fast, zero infrastructure, no mocks.
+3. **Snake runtime tests** — `Start`/`Stop`/`Snapshot`/`WaitNextFrame`/`PushDirection` against a real goroutine running at 20-30ms ticks. Includes the game-over callback firing on collision.
+4. **Handler + template contract tests** — `httptest` request → `goquery` parse → assert on selectors and `hx-*` attributes. Covers each route's happy path and at least one rejection.
+5. **Cross-reference test** — every `hx-target="#X"` and `hx-swap-oob` id in any handler response resolves to an element ID in the rendered shell.
+6. **Long-poll structural test** — reads every long-polling template's source and asserts no `hx-post`/`hx-put`/`hx-delete`/`hx-patch` substrings. Codifies the rule that interactive triggers don't live inside fragments that get swapped on a tight loop. (Added after a real bug — see `.claude/rules/views.md` "Interactive triggers must NOT live inside self-replacing templates".)
 
 **`e2e/e2e_test.go`** — black-box user-story tests (`package e2e`):
 
-5. **Full arcade flow per game** — name → pick game → pick difficulty → play to completion → leaderboard reflects the score.
-6. **Wizard skip-ahead rejected** — POSTing a step-3 request while in step-1 returns the OOB error banner.
-7. **Move-after-game-over rejected** — finish a game, simulate a late move (two-tab race), get the OOB error.
-8. **Replay preserves game+difficulty** — Replay link from `finished` lands back in `playing` with the same game/difficulty.
-9. **Leaderboard separated by difficulty** — scores on Easy and Hard show in separate top-10 views.
-10. **Snake long-poll delivers next frame** — open the long-poll endpoint, push a direction into the channel, assert the streamed HTML reflects the new snake position.
+7. **Full arcade flow per game** — name → pick game → pick difficulty → start → play → quit. One test for each of 2048, Minesweeper, and Snake. Snake's covers the long-poll: opens `/game/snake/board`, posts a direction, fetches the next frame.
+8. **Wizard skip-ahead rejected** — POSTing a step-3 request while in step-1 returns the OOB error banner.
+9. **Back-nav** — game_chosen → back returns to the game picker.
+10. **Replay-from-finished** — clicking Replay from the finished step lands back in playing with the same game/difficulty.
+11. **Different-game-from-finished** — clicking Different game returns to the game picker with the name preserved.
 
-Per-test SQLite lives in `t.TempDir()` (not `:memory:` — that breaks under `database/sql` connection pooling). No browser, no JSDOM, no Chrome binary. Full suite runs in well under three seconds.
+Per-test SQLite lives in `t.TempDir()` (not `:memory:` — that breaks under `database/sql` connection pooling). No browser, no JSDOM, no Chrome binary. ~50 tests, full suite runs in under two seconds. Total coverage hovers around 73% (pure layers at 90-100%, handler/wiring layers at 55-75% — the expected shape).
 
 ## Project layout
 
@@ -99,15 +100,16 @@ See `CLAUDE.md` for the full folder structure and per-area rules. Briefly:
 ```
 app.go                       (package arcade — NewApp, RunMigrations, embeds)
 wizard.go                    (Wizard FSM — orchestrates the step-form lobby)
-game_snake.go                (Snake FSM + runtime + goroutine loop)
-game_2048.go                 (2048 FSM + board logic)
-game_minesweeper.go          (Minesweeper FSM + board logic)
+game_2048.go                 (2048 FSM + pure board logic)
+game_minesweeper.go          (Minesweeper FSM + pure RevealCell/FlagCell)
+game_snake.go                (Snake FSM + pure Tick/SetDirection)
+game_snake_runtime.go        (Impure shell: per-session goroutine + long-poll waiters)
 handlers.go                  (Echo handlers — bridge wizard + game FSMs)
 render.go                    (template parsing + Render helper)
 main_test.go                 (white-box tests)
 cmd/server/main.go           (package main entrypoint)
 e2e/e2e_test.go              (package e2e black-box tests)
-views/                       (html/template files — layout + step + per-game templates)
+views/                       (html/template files — layout + wizard steps + per-game boards)
 static/                      (vendored Pico.css)
 migrations/                  (Goose SQL — sessions, game_states, leaderboard)
 query.sql, sqlc.yaml         (sqlc setup)
@@ -119,7 +121,9 @@ db/ (sqlc-generated)         Makefile
 
 ### DOM-level HTMX bugs are not caught in CI
 
-`hx-target` that resolves to an element hidden by an earlier swap, `hx-trigger` event timing, history/restore edge cases — only a real browser sees these. The cross-reference test catches the most common silent failure (typoed/stale target) at the contract level; the rest is accepted risk for the speed gains.
+`hx-target` that resolves to an element hidden by an earlier swap, `hx-trigger` event timing, history/restore edge cases — only a real browser sees these. The cross-reference test catches the most common silent failure (typoed/stale target) at the contract level.
+
+One concrete instance of this trade-off has already played out: Snake's direction controls were originally placed inside the long-polling fragment that gets replaced every ~150ms. The backend handler was correct, all tests passed, but in a real browser the click/keydown listeners were unreliable because HTMX has to rebind elements that are constantly being destroyed and recreated. Caught by manual play-through, fixed by moving controls into a stable parent template, and codified afterwards by a structural test that reads each long-poll template's source and asserts no state-mutating `hx-*` attributes. The full rule lives in `.claude/rules/views.md` ("Interactive triggers must NOT live inside self-replacing templates"). That's an example of how the harness handles bugs of this class: not by adding a browser to CI, but by turning each discovered failure mode into a static structural assertion.
 
 ### Real-time interactivity has a ceiling
 

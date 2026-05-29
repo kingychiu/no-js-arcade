@@ -110,6 +110,7 @@ no-js-arcade/
 │   └── rules/                 # path-scoped detailed rules — load on demand
 │       ├── handlers.md        # paths: handlers.go, app.go, cmd/server/**
 │       ├── fsm.md             # paths: wizard.go, game_*.go
+│       ├── pure_functions.md  # paths: wizard.go, game_*.go
 │       ├── views.md           # paths: views/**, render.go, static/**
 │       ├── database.md        # paths: query.sql, sqlc.yaml, migrations/**, db/**
 │       ├── tests.md           # paths: main_test.go, **/*_test.go
@@ -119,9 +120,10 @@ no-js-arcade/
 ├── go.sum
 ├── app.go                     # package arcade — NewApp(), RunMigrations(), embeds
 ├── wizard.go                  # Wizard FSM — orchestrates the step-form lobby
-├── game_snake.go              # Snake FSM + per-session goroutine loop
-├── game_2048.go               # 2048 FSM + board logic
-├── game_minesweeper.go        # Minesweeper FSM + board logic
+├── game_2048.go               # 2048 FSM + pure board logic
+├── game_minesweeper.go        # Minesweeper FSM + pure RevealCell/FlagCell
+├── game_snake.go              # Snake FSM + pure Tick/SetDirection
+├── game_snake_runtime.go      # Impure shell: per-session goroutine + long-poll waiters
 ├── handlers.go                # Echo HTTP handlers — bridge wizard + game FSMs
 ├── render.go                  # template parsing + Render helper
 ├── main_test.go               # in-process httptest tests (white-box, package arcade)
@@ -138,15 +140,13 @@ no-js-arcade/
 │   ├── 002_games.sql          # active game state (board JSON, fsm state)
 │   └── 003_leaderboard.sql    # per-(game, difficulty) scores
 ├── views/                     # html/template files
-│   ├── layout.html
-│   ├── wizard_name.html       # step 1
-│   ├── wizard_game.html       # step 2
-│   ├── wizard_difficulty.html # step 3
-│   ├── wizard_finished.html   # step 5
-│   ├── snake_board.html       # step 4 — Snake
-│   ├── twenty48_board.html    # step 4 — 2048
-│   ├── minesweeper_board.html # step 4 — Minesweeper
-│   ├── leaderboard.html       # per-(game, difficulty) view
+│   ├── layout.html            # page shell — calls {{ template "wizard_frame" . }}
+│   ├── wizard.html            # all step templates (define blocks): step_name,
+│   │                          # step_game, step_difficulty, step_ready,
+│   │                          # step_playing, step_finished, leaderboard
+│   ├── twenty48_board.html    # 2048 board fragment (turn-based swap target)
+│   ├── minesweeper_board.html # Minesweeper grid fragment
+│   ├── snake_board.html       # Snake board fragment (long-poll target — DISPLAY ONLY)
 │   └── error_banner.html      # OOB error fragment
 └── static/
     └── pico.css               # vendored Pico v2
@@ -154,11 +154,13 @@ no-js-arcade/
 
 **Layout rationale:**
 - Root files are `package arcade` so both `cmd/server` and `e2e/` can import the wiring.
-- **One file per FSM** (`wizard.go`, `game_snake.go`, `game_2048.go`, `game_minesweeper.go`). Each file holds its FSM constants, `CanTransitionTo`, and the game's runtime logic. Keeps each FSM near its consumers and acknowledges they're independently scoped.
+- **One file per FSM** (`wizard.go`, `game_snake.go`, `game_2048.go`, `game_minesweeper.go`). Each file holds its FSM constants, `CanTransitionTo`, and the game's pure runtime logic. Keeps each FSM near its consumers and acknowledges they're independently scoped.
+- **Snake's impure shell is split out** (`game_snake_runtime.go`) — the per-session goroutine, long-poll waiter registry, and channel-based input live here. The pure `Tick` and `SetDirection` live in `game_snake.go` and are called by the shell. This is the project's only piece of stateful in-memory machinery.
 - `handlers.go` is the bridge: every state-mutating handler loads the wizard state, optionally loads the game state, validates the intended transition against both FSMs, applies the optimistic SQL UPDATE, and renders.
 - `cmd/server/main.go` is the only `package main` — a thin entrypoint calling `arcade.NewApp`.
 - `e2e/` is a separate package, which **physically forbids** importing unexported helpers. User-story tests can only drive the system through HTTP.
-- Application code stays flat at the package layer; we only split when there's a real boundary (entrypoint, black-box tests).
+- **Long-polling display fragments and interactive triggers are separated.** Snake's `snake_board.html` is the long-poll target (display only — no `hx-post`/`hx-put`/`hx-delete`). The interactive controls live in `step_playing` (rendered once, stays bound). Enforced by a structural test; see `.claude/rules/views.md` "Interactive triggers must NOT live inside self-replacing templates".
+- Application code stays flat at the package layer; we only split when there's a real boundary (entrypoint, black-box tests, impure shell for goroutine state).
 
 ## How the rules are split
 
