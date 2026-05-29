@@ -34,6 +34,7 @@ func NewApp(sqldb *sql.DB) (*echo.Echo, error) {
 		Q:     db.New(sqldb),
 		Views: views,
 		rng:   rand.New(rand.NewSource(time.Now().UnixNano())),
+		Snake: NewSnakeRuntime(),
 	}
 
 	e := echo.New()
@@ -55,6 +56,8 @@ func NewApp(sqldb *sql.DB) (*echo.Echo, error) {
 	e.POST("/game/2048/move", h.PostT48Move)
 	e.POST("/game/minesweeper/reveal", h.PostMSReveal)
 	e.POST("/game/minesweeper/flag", h.PostMSFlag)
+	e.GET("/game/snake/board", h.GetSnakeBoard)
+	e.POST("/game/snake/direction", h.PostSnakeDirection)
 
 	return e, nil
 }

@@ -197,6 +197,52 @@ func TestE2E_ReplayFromFinished(t *testing.T) {
 	}
 }
 
+// TestE2E_FullArcadeFlow_Snake walks a Snake game through the wizard, sends
+// a direction, polls a frame, then quits.
+func TestE2E_FullArcadeFlow_Snake(t *testing.T) {
+	t.Parallel()
+	srv, client := newServer(t)
+
+	_ = parseAndClose(t, get(t, client, srv.URL+"/"))
+	_ = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/name", url.Values{"name": {"Snakr"}}))
+	doc := parseAndClose(t, postForm(t, client, srv.URL+"/wizard/game", url.Values{"game": {"snake"}}))
+	if dataStep(doc) != "difficulty" {
+		t.Fatalf("after game, step = %q", dataStep(doc))
+	}
+	if !strings.Contains(doc.Text(), "tick") {
+		t.Errorf("expected Snake-specific difficulty labels")
+	}
+
+	_ = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/difficulty", url.Values{"difficulty": {"medium"}}))
+	doc = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/start", nil))
+	if dataStep(doc) != "playing" {
+		t.Fatalf("after start, step = %q", dataStep(doc))
+	}
+	if doc.Find("#snake-board").Length() == 0 {
+		t.Errorf("expected snake-board")
+	}
+
+	// Push a direction.
+	resp := postForm(t, client, srv.URL+"/game/snake/direction", url.Values{"dir": {"N"}})
+	if resp.StatusCode != 204 {
+		t.Errorf("direction status = %d, want 204", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// Long-poll a frame — the goroutine ticks every 150ms by default, so
+	// a single request should return within 500ms even on a slow machine.
+	doc = parseAndClose(t, get(t, client, srv.URL+"/game/snake/board"))
+	if doc.Find("#snake-board").Length() == 0 {
+		t.Errorf("expected snake-board fragment from long-poll")
+	}
+
+	// Quit.
+	doc = parseAndClose(t, postForm(t, client, srv.URL+"/wizard/quit", nil))
+	if dataStep(doc) != "finished" {
+		t.Fatalf("after quit, step = %q", dataStep(doc))
+	}
+}
+
 // TestE2E_FullArcadeFlow_Minesweeper walks a Minesweeper game from name to
 // finished via Quit, exercising the new game type end-to-end.
 func TestE2E_FullArcadeFlow_Minesweeper(t *testing.T) {

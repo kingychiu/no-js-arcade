@@ -27,7 +27,7 @@
   <div class="arcade-controls">
     <button name="game" value="2048" type="submit" hx-disabled-elt="this">2048</button>
     <button name="game" value="minesweeper" type="submit" hx-disabled-elt="this">Minesweeper</button>
-    <button name="game" value="snake" type="submit" disabled>Snake (Phase 3)</button>
+    <button name="game" value="snake" type="submit" hx-disabled-elt="this">Snake</button>
   </div>
 </form>
 {{ end }}
@@ -45,6 +45,10 @@
       <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy (9×9, 10 mines)</button>
       <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium (16×16, 40 mines)</button>
       <button name="difficulty" value="hard"   type="submit" hx-disabled-elt="this">Hard (24×24, 99 mines)</button>
+    {{ else if eq .Session.ChosenGame "snake" }}
+      <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy (slow, 250ms tick)</button>
+      <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium (150ms)</button>
+      <button name="difficulty" value="hard"   type="submit" hx-disabled-elt="this">Hard (fast, 80ms)</button>
     {{ else }}
       <button name="difficulty" value="easy"   type="submit" hx-disabled-elt="this">Easy</button>
       <button name="difficulty" value="medium" type="submit" hx-disabled-elt="this">Medium</button>
@@ -76,10 +80,12 @@
 </header>
 {{ if eq .Session.ChosenGame "2048" }}{{ template "twenty48_board" .Board }}{{ end }}
 {{ if eq .Session.ChosenGame "minesweeper" }}{{ template "minesweeper_board" .Board }}{{ end }}
+{{ if eq .Session.ChosenGame "snake" }}{{ template "snake_board" .Board }}{{ end }}
 <details>
   <summary>How to play</summary>
   {{ if eq .Session.ChosenGame "2048" }}<p>Use the arrow keys (or buttons) to slide tiles. Combine matching numbers to reach 2048.</p>{{ end }}
   {{ if eq .Session.ChosenGame "minesweeper" }}<p>Click cells to reveal them. Click the small ⚑ in the corner to flag a suspected mine. Win by revealing every non-mine cell.</p>{{ end }}
+  {{ if eq .Session.ChosenGame "snake" }}<p>Use the arrow keys (or buttons) to steer. The snake moves on a server-side tick — the long-polling tier in action. Eat the red dot to grow.</p>{{ end }}
 </details>
 <form hx-post="/wizard/quit" hx-target="#wizard-frame" hx-swap="innerHTML" class="arcade-controls">
   <button type="submit" class="secondary outline" hx-disabled-elt="this">Quit (no score)</button>

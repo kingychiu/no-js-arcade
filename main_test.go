@@ -1,6 +1,7 @@
 package arcade
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	_ "github.com/mattn/go-sqlite3"
@@ -384,6 +386,240 @@ func TestMS_FlagCell_RevealedNoOp(t *testing.T) {
 	}
 }
 
+func TestSnakeFSM_CanTransitionTo(t *testing.T) {
+	t.Parallel()
+	allowed := map[SnakeState]map[SnakeState]bool{
+		SnakeIdle:     {SnakePlaying: true},
+		SnakePlaying:  {SnakeGameOver: true},
+		SnakeGameOver: {},
+	}
+	states := []SnakeState{SnakeIdle, SnakePlaying, SnakeGameOver}
+	for _, from := range states {
+		for _, to := range states {
+			want := allowed[from][to]
+			if got := from.CanTransitionTo(to); got != want {
+				t.Errorf("%s → %s: got %v, want %v", from, to, got, want)
+			}
+		}
+	}
+}
+
+func TestSnake_NewBoard_PlacesSnakeAndFood(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	b := NewSnakeBoard(20, 15, rng)
+	if b.Width != 20 || b.Height != 15 {
+		t.Fatalf("dimensions wrong: %dx%d", b.Width, b.Height)
+	}
+	if len(b.Snake) != 3 {
+		t.Fatalf("snake length = %d, want 3", len(b.Snake))
+	}
+	if b.Direction != SnakeEast {
+		t.Errorf("direction = %s, want East", b.Direction)
+	}
+	if b.Food.X < 0 || b.Food.Y < 0 {
+		t.Errorf("food not placed: %+v", b.Food)
+	}
+}
+
+func TestSnake_Tick_AdvancesEast(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	b := SnakeBoard{
+		Width: 10, Height: 10,
+		Snake:     []SnakeCell{{5, 5}, {4, 5}, {3, 5}},
+		Direction: SnakeEast,
+		Food:      SnakeCell{8, 8},
+	}
+	after, state := Tick(b, rng)
+	if state != SnakePlaying {
+		t.Fatalf("state = %s, want playing", state)
+	}
+	if after.Snake[0] != (SnakeCell{6, 5}) {
+		t.Errorf("head = %+v, want {6,5}", after.Snake[0])
+	}
+	if len(after.Snake) != 3 {
+		t.Errorf("length = %d, want 3 (no eat)", len(after.Snake))
+	}
+}
+
+func TestSnake_Tick_WallCollisionGameOver(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	b := SnakeBoard{
+		Width: 10, Height: 10,
+		Snake:     []SnakeCell{{9, 5}, {8, 5}, {7, 5}},
+		Direction: SnakeEast,
+		Food:      SnakeCell{0, 0},
+	}
+	_, state := Tick(b, rng)
+	if state != SnakeGameOver {
+		t.Errorf("expected game_over on wall, got %s", state)
+	}
+}
+
+func TestSnake_Tick_SelfCollisionGameOver(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	// U-shaped snake; next step into own body.
+	b := SnakeBoard{
+		Width: 10, Height: 10,
+		Snake: []SnakeCell{
+			{5, 5}, {5, 4}, {6, 4}, {6, 5}, {6, 6},
+		},
+		Direction: SnakeEast,
+		Food:      SnakeCell{0, 0},
+	}
+	_, state := Tick(b, rng)
+	if state != SnakeGameOver {
+		t.Errorf("expected game_over on self collision, got %s", state)
+	}
+}
+
+func TestSnake_Tick_EatsFoodGrowsAndScores(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(1))
+	b := SnakeBoard{
+		Width: 10, Height: 10,
+		Snake:     []SnakeCell{{5, 5}, {4, 5}, {3, 5}},
+		Direction: SnakeEast,
+		Food:      SnakeCell{6, 5},
+		Score:     0,
+	}
+	after, state := Tick(b, rng)
+	if state != SnakePlaying {
+		t.Fatalf("state = %s, want playing", state)
+	}
+	if len(after.Snake) != 4 {
+		t.Errorf("length = %d, want 4 (ate food)", len(after.Snake))
+	}
+	if after.Score != 1 {
+		t.Errorf("score = %d, want 1", after.Score)
+	}
+	if after.Food == (SnakeCell{6, 5}) {
+		t.Errorf("food should be respawned elsewhere")
+	}
+}
+
+func TestSnake_SetDirection_RejectsReverse(t *testing.T) {
+	t.Parallel()
+	b := SnakeBoard{Direction: SnakeEast}
+	if got := SetDirection(b, SnakeWest); got.Direction != SnakeEast {
+		t.Errorf("reverse should be rejected; direction = %s", got.Direction)
+	}
+	if got := SetDirection(b, SnakeNorth); got.Direction != SnakeNorth {
+		t.Errorf("perpendicular should be accepted")
+	}
+}
+
+func TestSnake_NewBoardView_LabelsCellsCorrectly(t *testing.T) {
+	t.Parallel()
+	b := SnakeBoard{
+		Width: 5, Height: 5,
+		Snake:     []SnakeCell{{2, 2}, {1, 2}},
+		Direction: SnakeEast,
+		Food:      SnakeCell{4, 4},
+		Score:     7,
+	}
+	v := NewSnakeBoardView(b)
+	if v.Score != 7 {
+		t.Errorf("score = %d, want 7", v.Score)
+	}
+	if v.Cells[2][2] != "head" {
+		t.Errorf("(2,2) = %s, want head", v.Cells[2][2])
+	}
+	if v.Cells[2][1] != "body" {
+		t.Errorf("(1,2) = %s, want body", v.Cells[2][1])
+	}
+	if v.Cells[4][4] != "food" {
+		t.Errorf("(4,4) = %s, want food", v.Cells[4][4])
+	}
+	if v.Cells[0][0] != "empty" {
+		t.Errorf("(0,0) = %s, want empty", v.Cells[0][0])
+	}
+}
+
+// --- Snake runtime tests ---
+
+func TestSnakeRuntime_StartAndSnapshot(t *testing.T) {
+	t.Parallel()
+	rt := NewSnakeRuntime()
+	rng := rand.New(rand.NewSource(1))
+	board := NewSnakeBoard(10, 10, rng)
+	rt.Start("sess1", board, 500*time.Millisecond, rng, nil)
+	defer rt.Stop("sess1")
+
+	sg, ok := rt.Get("sess1")
+	if !ok {
+		t.Fatalf("session not registered")
+	}
+	b, state, score := sg.Snapshot()
+	if state != SnakePlaying {
+		t.Errorf("state = %s, want playing", state)
+	}
+	if b.Width != 10 {
+		t.Errorf("board width = %d, want 10", b.Width)
+	}
+	if score != 0 {
+		t.Errorf("score = %d, want 0", score)
+	}
+}
+
+func TestSnakeRuntime_TickAdvances(t *testing.T) {
+	t.Parallel()
+	rt := NewSnakeRuntime()
+	rng := rand.New(rand.NewSource(1))
+	board := NewSnakeBoard(20, 15, rng)
+	startHead := board.Snake[0]
+	rt.Start("sessTick", board, 30*time.Millisecond, rng, nil)
+	defer rt.Stop("sessTick")
+
+	sg, _ := rt.Get("sessTick")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	sg.WaitNextFrame(ctx)
+
+	after, _, _ := sg.Snapshot()
+	if after.Snake[0] == startHead {
+		t.Errorf("head did not advance after a tick")
+	}
+}
+
+func TestSnakeRuntime_GameOverCallbackFires(t *testing.T) {
+	t.Parallel()
+	rt := NewSnakeRuntime()
+	// Construct a board where the next tick will hit a wall.
+	board := SnakeBoard{
+		Width: 5, Height: 5,
+		Snake:     []SnakeCell{{4, 2}, {3, 2}, {2, 2}},
+		Direction: SnakeEast,
+		Food:      SnakeCell{0, 0},
+	}
+	done := make(chan int, 1)
+	rt.Start("sessGO", board, 20*time.Millisecond, rand.New(rand.NewSource(1)), func(sid string, score int) {
+		done <- score
+	})
+	defer rt.Stop("sessGO")
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("onEnd callback did not fire within 500ms")
+	}
+}
+
+func TestSnakeRuntime_StopHaltsGoroutine(t *testing.T) {
+	t.Parallel()
+	rt := NewSnakeRuntime()
+	rng := rand.New(rand.NewSource(1))
+	board := NewSnakeBoard(10, 10, rng)
+	rt.Start("sessStop", board, 30*time.Millisecond, rng, nil)
+	rt.Stop("sessStop")
+	if _, ok := rt.Get("sessStop"); ok {
+		t.Errorf("session should be removed after Stop")
+	}
+}
+
 // --- 3. Handler + template contract tests ---
 
 type testEnv struct {
@@ -411,6 +647,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Q:     db.New(sqldb),
 		Views: views,
 		rng:   rand.New(rand.NewSource(42)),
+		Snake: NewSnakeRuntime(),
 	}
 	e := echo.New()
 	e.HideBanner = true
@@ -427,6 +664,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	e.POST("/game/2048/move", h.PostT48Move)
 	e.POST("/game/minesweeper/reveal", h.PostMSReveal)
 	e.POST("/game/minesweeper/flag", h.PostMSFlag)
+	e.GET("/game/snake/board", h.GetSnakeBoard)
+	e.POST("/game/snake/direction", h.PostSnakeDirection)
 	return &testEnv{e: e, q: h.Q, h: h}
 }
 
@@ -618,6 +857,48 @@ func TestPostMSReveal_InvalidCoords_OOBError(t *testing.T) {
 	if doc.Find(`#error-banner[hx-swap-oob="true"]`).Length() == 0 {
 		t.Errorf("expected OOB error for invalid coord")
 	}
+}
+
+func TestPostWizardStart_Snake_SpawnsGoroutine(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	cookie := walkToReady(t, env, "Snakr", "snake", "medium")
+	rec, _ := env.post(t, cookie, "/wizard/start", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	doc := parseHTML(t, rec)
+	if doc.Find("#snake-board").Length() == 0 {
+		t.Errorf("expected snake board fragment after start")
+	}
+	// Goroutine should be registered.
+	// Walk to the session id via the cookie.
+	parts := strings.SplitN(cookie, "=", 2)
+	if len(parts) != 2 {
+		t.Fatalf("cookie parse: %q", cookie)
+	}
+	if _, ok := env.h.Snake.Get(parts[1]); !ok {
+		t.Errorf("Snake goroutine should be running for the session")
+	}
+	t.Cleanup(func() { env.h.Snake.Stop(parts[1]) })
+}
+
+func TestPostSnakeDirection_PushesToRuntime(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	cookie := walkToReady(t, env, "Steerer", "snake", "medium")
+	_, cookie = env.post(t, cookie, "/wizard/start", nil)
+
+	rec, _ := env.post(t, cookie, "/game/snake/direction", url.Values{"dir": {"N"}})
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", rec.Code)
+	}
+	t.Cleanup(func() {
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) == 2 {
+			env.h.Snake.Stop(parts[1])
+		}
+	})
 }
 
 func TestPostMSFlag_TogglesFlagOnHiddenCell(t *testing.T) {

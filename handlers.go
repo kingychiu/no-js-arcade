@@ -1,6 +1,7 @@
 package arcade
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kingychiu/no-js-todolist/db"
 	"github.com/labstack/echo/v4"
@@ -17,6 +19,7 @@ type Handlers struct {
 	Q     *db.Queries
 	Views *Views
 	rng   *rand.Rand
+	Snake *SnakeRuntime
 }
 
 const sessionCookieName = "arcade_session"
@@ -72,6 +75,11 @@ func (h *Handlers) buildViewData(c echo.Context, sess db.Session) (*ViewData, er
 			var b MSBoard
 			if err := json.Unmarshal([]byte(gs.Board), &b); err == nil {
 				data.Board = b
+			}
+		case GameSnake:
+			if sg, ok := h.Snake.Get(sess.ID); ok {
+				board, _, _ := sg.Snapshot()
+				data.Board = NewSnakeBoardView(board)
 			}
 		}
 	case WizardFinished:
@@ -193,7 +201,7 @@ func (h *Handlers) PostWizardGame(c echo.Context) error {
 	if !ValidGame(game) {
 		return h.renderFrameWithError(c, sess, "Unknown game.")
 	}
-	if game != Game2048 && game != GameMinesweeper {
+	if game != Game2048 && game != GameMinesweeper && game != GameSnake {
 		return h.renderFrameWithError(c, sess, "That game isn't available yet.")
 	}
 	after, ok, err := h.transitionSession(c, sess, WizardGameChosen, string(game), "")
@@ -276,6 +284,10 @@ func (h *Handlers) PostWizardQuit(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	// If a Snake goroutine is running for this session, shut it down.
+	if Game(sess.ChosenGame) == GameSnake {
+		h.Snake.Stop(sess.ID)
+	}
 	// Playing → Finished, no leaderboard entry (player chose to quit).
 	after, ok, err := h.transitionSession(c, sess, WizardFinished, sess.ChosenGame, sess.ChosenDiff)
 	if err != nil {
@@ -310,6 +322,7 @@ func (h *Handlers) PostWizardChangeDifficulty(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	h.Snake.Stop(sess.ID)
 	after, ok, err := h.transitionSession(c, sess, WizardGameChosen, sess.ChosenGame, "")
 	if err != nil {
 		return err
@@ -325,6 +338,7 @@ func (h *Handlers) PostWizardDifferentGame(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	h.Snake.Stop(sess.ID)
 	after, ok, err := h.transitionSession(c, sess, WizardNamed, "", "")
 	if err != nil {
 		return err
@@ -374,6 +388,31 @@ func (h *Handlers) initGame(c echo.Context, sess db.Session) error {
 			Board:      string(boardJSON),
 			Score:      0,
 		})
+	case GameSnake:
+		w, ht, tick := SnakeDimensions(Difficulty(sess.ChosenDiff))
+		snakeRng := rand.New(rand.NewSource(h.rng.Int63()))
+		board := NewSnakeBoard(w, ht, snakeRng)
+		boardJSON, err := json.Marshal(board)
+		if err != nil {
+			return err
+		}
+		if err := h.Q.UpsertGameState(ctx, db.UpsertGameStateParams{
+			SessionID:  sess.ID,
+			Game:       sess.ChosenGame,
+			Difficulty: sess.ChosenDiff,
+			FsmState:   string(SnakePlaying),
+			Board:      string(boardJSON),
+			Score:      0,
+		}); err != nil {
+			return err
+		}
+		// Replace any existing goroutine and start a fresh one. The onEnd
+		// callback persists the leaderboard entry and transitions the
+		// wizard to finished from the background goroutine.
+		h.Snake.Start(sess.ID, board, tick, snakeRng, func(sid string, score int) {
+			h.onSnakeGameOver(sid, score)
+		})
+		return nil
 	}
 	return errors.New("unsupported game")
 }
@@ -456,6 +495,109 @@ func (h *Handlers) PostT48Move(c echo.Context) error {
 
 	// Game continues: respond with the updated board only.
 	return h.Views.Render(c, "twenty48_board", after)
+}
+
+// --- Snake handlers ---
+
+// GetSnakeBoard is the long-poll endpoint. It blocks until the goroutine
+// produces another frame, then returns the new board fragment. If the game
+// ended, it retargets the swap to the wizard frame so the player sees the
+// finished step.
+func (h *Handlers) GetSnakeBoard(c echo.Context) error {
+	sess, err := h.sessionFor(c)
+	if err != nil {
+		return err
+	}
+	if WizardState(sess.WizardState) != WizardPlaying || Game(sess.ChosenGame) != GameSnake {
+		c.Response().Header().Set("HX-Retarget", "#wizard-frame")
+		c.Response().Header().Set("HX-Reswap", "innerHTML")
+		return h.renderFrame(c, sess)
+	}
+
+	sg, ok := h.Snake.Get(sess.ID)
+	if !ok {
+		c.Response().Header().Set("HX-Retarget", "#wizard-frame")
+		c.Response().Header().Set("HX-Reswap", "innerHTML")
+		return h.renderFrame(c, sess)
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 25*time.Second)
+	defer cancel()
+	sg.WaitNextFrame(ctx)
+
+	board, state, _ := sg.Snapshot()
+	if state == SnakeGameOver {
+		latest, err := h.Q.GetSession(c.Request().Context(), sess.ID)
+		if err != nil {
+			return err
+		}
+		c.Response().Header().Set("HX-Retarget", "#wizard-frame")
+		c.Response().Header().Set("HX-Reswap", "innerHTML")
+		return h.renderFrame(c, latest)
+	}
+
+	return h.Views.Render(c, "snake_board", NewSnakeBoardView(board))
+}
+
+// PostSnakeDirection forwards a direction change into the goroutine's input
+// channel. Fire-and-forget: returns 204 so the client's hx-swap="none"
+// doesn't change anything visible.
+func (h *Handlers) PostSnakeDirection(c echo.Context) error {
+	sess, err := h.sessionFor(c)
+	if err != nil {
+		return err
+	}
+	if WizardState(sess.WizardState) != WizardPlaying || Game(sess.ChosenGame) != GameSnake {
+		return c.NoContent(http.StatusNoContent)
+	}
+	dir := SnakeDirection(c.FormValue("dir"))
+	if !ValidSnakeDirection(dir) {
+		return c.NoContent(http.StatusNoContent)
+	}
+	if sg, ok := h.Snake.Get(sess.ID); ok {
+		sg.PushDirection(dir)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+// onSnakeGameOver runs from inside the snake goroutine when it detects a
+// collision. It inserts a leaderboard entry, persists the final board state,
+// and transitions the session's wizard to Finished. Errors are intentionally
+// swallowed (the long-poll handler will re-check the session and recover).
+func (h *Handlers) onSnakeGameOver(sessionID string, score int) {
+	ctx := context.Background()
+	sess, err := h.Q.GetSession(ctx, sessionID)
+	if err != nil {
+		return
+	}
+	_, _ = h.Q.InsertLeaderboardEntry(ctx, db.InsertLeaderboardEntryParams{
+		Name:       sess.Name,
+		Game:       sess.ChosenGame,
+		Difficulty: sess.ChosenDiff,
+		Score:      int64(score),
+	})
+
+	if sg, ok := h.Snake.Get(sessionID); ok {
+		board, _, _ := sg.Snapshot()
+		if boardJSON, err := json.Marshal(board); err == nil {
+			_ = h.Q.UpsertGameState(ctx, db.UpsertGameStateParams{
+				SessionID:  sessionID,
+				Game:       sess.ChosenGame,
+				Difficulty: sess.ChosenDiff,
+				FsmState:   string(SnakeGameOver),
+				Board:      string(boardJSON),
+				Score:      int64(score),
+			})
+		}
+	}
+
+	_, _ = h.Q.UpdateSessionWizardState(ctx, db.UpdateSessionWizardStateParams{
+		NewState:      string(WizardFinished),
+		ChosenGame:    sess.ChosenGame,
+		ChosenDiff:    sess.ChosenDiff,
+		ID:            sess.ID,
+		ExpectedState: string(WizardPlaying),
+	})
 }
 
 // --- Minesweeper handlers ---
